@@ -1,0 +1,144 @@
+name: Windows (EXE + NSIS Installer)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: "3.27.1"
+  APP_NAME: erp_system
+
+jobs:
+  build:
+    name: Windows (EXE + NSIS Installer)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Enable Windows Desktop
+        shell: pwsh
+        run: flutter config --enable-windows-desktop
+
+      # ---------- الإصلاح الجوهري ----------
+      - name: Recreate Windows Platform (Fix broken symlinks)
+        shell: pwsh
+        run: |
+          Write-Host "Deleting broken windows/ folder from repo..."
+          Remove-Item -Recurse -Force windows -ErrorAction SilentlyContinue
+          Write-Host "Recreating windows/ from scratch on Windows runner..."
+          flutter create --platforms=windows .
+      # -------------------------------------
+
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          flutter pub get
+          flutter pub upgrade
+
+      - name: Run Tests
+        shell: pwsh
+        run: |
+          if (Test-Path test) {
+            flutter test
+          } else {
+            Write-Host "No tests found."
+          }
+
+      - name: Precache Windows Engine Artifacts
+        shell: pwsh
+        run: flutter precache --windows
+
+      - name: Build Windows Release
+        shell: pwsh
+        run: flutter build windows --release
+
+      - name: Read Version From pubspec.yaml
+        id: ver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$' | Select-Object -First 1
+          $full = $line.Matches.Groups[1].Value.Trim()
+          $version = $full.Split('+')[0]
+          Write-Host "Resolved version: $version"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Create Portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path build/windows/x64/runner/Release/* `
+            -DestinationPath ERP-Windows-Portable.zip `
+            -Force
+
+      - name: Upload Portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ERP-Windows-Portable
+          path: ERP-Windows-Portable.zip
+
+      - name: Upload Release Folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: ERP-Windows-Release
+          path: build/windows/x64/runner/Release
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Set Installer Version
+        shell: pwsh
+        run: |
+          (Get-Content installers/installer.nsi) `
+            -replace 'APP_VERSION_PLACEHOLDER', '${{ steps.ver.outputs.version }}' |
+            Set-Content installers/installer.nsi
+
+      - name: Build NSIS Installer
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\NSIS\makensis.exe" installers\installer.nsi'
+
+      - name: Locate Installer Output
+        id: find_installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path installers -Filter "ERP_Setup.exe" -Recurse |
+                 Select-Object -First 1
+          if (-not $exe) {
+            $exe = Get-ChildItem -Path . -Filter "ERP_Setup.exe" -Recurse |
+                   Select-Object -First 1
+          }
+          if (-not $exe) {
+            Write-Error "ERP_Setup.exe not found after makensis run."
+            exit 1
+          }
+
+          Write-Host "Found installer at: $($exe.FullName)"
+          echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload NSIS Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ERP-Windows-Setup
+          path: ${{ steps.find_installer.outputs.path }}
