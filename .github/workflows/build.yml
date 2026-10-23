@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: windows-build-${{ github.ref }}
@@ -55,7 +55,6 @@ jobs:
         shell: pwsh
         run: |
           flutter pub get
-          flutter pub upgrade
 
       - name: Run Tests
         shell: pwsh
